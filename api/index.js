@@ -8,6 +8,7 @@ const auth = require('../routes/auth')
 const client = require('../routes/client')
 const billRoutes = require('../routes/billRoutes');
 const serviceBillRoutes = require('../routes/serviceBillRoutes');
+const serviceRoutes = require('../routes/serviceRoutes');
 const emailRoutes = require('../routes/emailRoutes');
 const pdfRoutes = require('../routes/pdfRoutes');
 
@@ -40,6 +41,7 @@ app.use('/api/auth', auth);
 app.use('/api/client', client);
 app.use('/api/bills', billRoutes);
 app.use('/api/service-bills', serviceBillRoutes);
+app.use('/api/services', serviceRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api/pdf', pdfRoutes);
 app.use('/api/proforma', proformaRoutes);
