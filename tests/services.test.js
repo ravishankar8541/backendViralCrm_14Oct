@@ -31,6 +31,22 @@ test('service catalog API validates, persists and deduplicates names behind auth
     if (simulateRace) throw Object.assign(new Error('Duplicate key'), { code: 11000 });
     return document;
   });
+  t.mock.method(Service, 'findOneAndUpdate', async (query, { $set: update }, options) => {
+    if (failDatabase) throw new Error('Database unavailable');
+    assert.deepEqual(options, { new: true, runValidators: true });
+    const record = records.find(item => item._id.toString() === query._id && !query.normalizedName.$nin.includes(item.normalizedName));
+    if (!record) return null;
+    if (records.some(item => item !== record && item.normalizedName === update.normalizedName)) {
+      throw Object.assign(new Error('Duplicate key'), { code: 11000 });
+    }
+    Object.assign(record, update);
+    return record;
+  });
+  t.mock.method(Service, 'findOneAndDelete', async query => {
+    if (failDatabase) throw new Error('Database unavailable');
+    const index = records.findIndex(item => item._id.toString() === query._id && !query.normalizedName.$nin.includes(item.normalizedName));
+    return index < 0 ? null : records.splice(index, 1)[0];
+  });
   const app = express();
   app.use(express.json());
   app.use('/api/services', require('../routes/serviceRoutes'));
@@ -39,8 +55,8 @@ test('service catalog API validates, persists and deduplicates names behind auth
   });
   t.after(() => new Promise(resolve => server.close(resolve)));
   const url = `http://127.0.0.1:${server.address().port}/api/services`;
-  const request = async (method = 'GET', body, token = 'valid-session') => {
-    const response = await fetch(url, { method, headers: {
+  const request = async (method = 'GET', body, token = 'valid-session', path = '') => {
+    const response = await fetch(`${url}${path}`, { method, headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'application/json',
     }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: response.status, ...await response.json() };
@@ -50,9 +66,13 @@ test('service catalog API validates, persists and deduplicates names behind auth
     for (const token of ['', 'invalid']) {
       assert.equal((await request('GET', undefined, token)).status, 401);
       assert.equal((await request('POST', { name: 'Unauthorized service' }, token)).status, 401);
+      assert.equal((await request('PATCH', { name: 'Unauthorized service' }, token, '/507f1f77bcf86cd799439012')).status, 401);
+      assert.equal((await request('DELETE', undefined, token, '/507f1f77bcf86cd799439012')).status, 401);
     }
     active = false;
     assert.equal((await request('POST', { name: 'Unauthorized service' })).status, 403);
+    assert.equal((await request('PATCH', { name: 'Unauthorized service' }, 'valid-session', '/507f1f77bcf86cd799439012')).status, 403);
+    assert.equal((await request('DELETE', undefined, 'valid-session', '/507f1f77bcf86cd799439012')).status, 403);
     active = true;
     assert.equal(records.length, 0);
   });
@@ -99,5 +119,45 @@ test('service catalog API validates, persists and deduplicates names behind auth
     assert.equal((await request('POST', { name: 'Newsletter' })).status, 500);
     failDatabase = false;
     assert.equal((await request('POST', { name: 'Newsletter' })).status, 201);
+  });
+  await t.test('custom services expose stable IDs; rename persists and rejects duplicates', async () => {
+    const catalog = await request();
+    const custom = catalog.customServices.find(service => service.name === 'Product Photography');
+    assert.ok(custom.id);
+    assert.equal(catalog.customServices.some(service => service.name === 'Web Development'), false);
+    const path = `/${custom.id}`;
+    for (const body of [{}, { name: [] }, { name: '   ' }, { name: 'x'.repeat(121) }]) {
+      assert.equal((await request('PATCH', body, 'valid-session', path)).status, 400);
+    }
+    for (const name of ['web DEVELOPMENT', ' animation ']) {
+      assert.equal((await request('PATCH', { name }, 'valid-session', path)).status, 409);
+    }
+    const response = await request('PATCH', { name: '  Studio   Photography  ' }, 'valid-session', path);
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.data, { id: custom.id, name: 'Studio Photography' });
+    const names = (await request()).data;
+    assert.ok(names.includes('Studio Photography'));
+    assert.equal(names.includes('Product Photography'), false);
+    assert.equal((await request('PATCH', { name: 'STUDIO Photography' }, 'valid-session', path)).status, 200);
+  });
+  await t.test('invalid or missing IDs cannot mutate services', async () => {
+    for (const method of ['PATCH', 'DELETE']) {
+      const body = method === 'PATCH' ? { name: 'Changed' } : undefined;
+      assert.equal((await request(method, body, 'valid-session', '/invalid')).status, 400);
+      assert.equal((await request(method, body, 'valid-session', '/507f1f77bcf86cd799439099')).status, 404);
+    }
+  });
+  await t.test('failed writes preserve names; confirmed deletion persists and permits recreating the name', async () => {
+    const service = (await request()).customServices.find(item => item.name === 'STUDIO Photography');
+    const path = `/${service.id}`;
+    failDatabase = true;
+    assert.equal((await request('PATCH', { name: 'Failed rename' }, 'valid-session', path)).status, 500);
+    assert.equal((await request('DELETE', undefined, 'valid-session', path)).status, 500);
+    failDatabase = false;
+    assert.ok((await request()).data.includes(service.name));
+    assert.equal((await request('DELETE', undefined, 'valid-session', path)).status, 200);
+    assert.equal((await request()).data.includes(service.name), false);
+    assert.equal((await request('DELETE', undefined, 'valid-session', path)).status, 404);
+    assert.equal((await request('POST', { name: service.name })).status, 201);
   });
 });
